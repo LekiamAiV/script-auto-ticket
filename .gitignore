@@ -1,0 +1,14 @@
+# Configuracion real: contiene los tokens de GLPI y datos internos
+config.json
+config.json.bak
+
+# Datos generados en ejecucion
+llamadas.log
+pendientes/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

@@ -1,0 +1,99 @@
+{
+  "listener": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "token": ""
+  },
+  "phonebar": {
+    "enabled": true,
+    "log_file": "",
+    "evento_apertura": "connect",
+    "solo_entrantes": true,
+    "agente": "",
+    "colas": [],
+    "poll_seconds": 1.0
+  },
+  "glpi": {
+    "url": "http://TU-GLPI/glpi/apirest.php",
+    "app_token": "PEGA_AQUI_EL_APP_TOKEN",
+    "user_token": "PEGA_AQUI_EL_USER_TOKEN",
+    "user": "",
+    "password": "",
+    "verify_ssl": true,
+    "timeout": 30,
+    "entities_id": 0,
+    "type": 1,
+    "urgency": 3,
+    "itilcategories_id": 0,
+    "requesttypes_id": 3,
+    "users_id_requester": 0,
+    "users_id_assign": 0,
+    "groups_id_assign": 0
+  },
+  "call": {
+    "dedup_seconds": 300,
+    "single_window": true,
+    "strip_prefixes": [
+      "+56",
+      "56",
+      "0"
+    ],
+    "min_digits": 6
+  },
+  "ui": {
+    "always_on_top": true,
+    "title_template": "{sucursal} - {resumen}",
+    "resumen_max": 70,
+    "sucursales": [
+      "Casa Matriz",
+      "Sucursal 1"
+    ],
+    "sucursales_locations": {},
+    "entidades": {
+      "Entidad Raiz": 0
+    },
+    "por_entidad": {},
+    "correos_usuarios": {},
+    "dominios_correo": [
+      "@tuempresa.cl"
+    ],
+    "dominio_por_entidad": {},
+    "telefono_sucursal": {},
+    "categorias": {},
+    "urgencias": {
+      "Muy baja": 1,
+      "Baja": 2,
+      "Media": 3,
+      "Alta": 4,
+      "Muy alta": 5
+    }
+  },
+  "xcally": {
+    "enabled": false,
+    "base_url": "",
+    "token": "",
+    "poll_endpoint": "/api/voice/channels",
+    "poll_seconds": 3,
+    "agent_filter": "",
+    "number_fields": [
+      "calleridnum",
+      "callerid",
+      "source",
+      "from",
+      "cid",
+      "caller"
+    ],
+    "id_fields": [
+      "uniqueid",
+      "linkedid",
+      "callid",
+      "id"
+    ],
+    "verify_ssl": true
+  },
+  "log": {
+    "file": "llamadas.log",
+    "pending_dir": "pendientes"
+  }
+}
