@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -111,8 +112,42 @@ DEFAULT_CONFIG = {
         "correos_usuarios": {},
         "dominios_correo": [],
         "dominio_por_entidad": {},
+        "entidad_por_dominio": {},
         "telefono_sucursal": {},
         "categorias": {},
+        "categoria_preferida": "",
+        "titulo_etiquetas_ignorar": [
+            "motivo", "asunto", "detalle", "descripcion", "problema",
+            "consulta", "resumen", "observacion", "novedad"
+        ],
+        "titulo_frases_ignorar": [
+            "buenos dias", "buenas tardes", "buenas noches", "hola",
+            "estimados", "estimado", "estimada",
+            "el cliente indica que", "cliente indica que",
+            "el cliente informa que", "cliente informa que",
+            "el cliente reporta que", "cliente reporta que",
+            "el cliente comenta que", "cliente comenta que",
+            "el cliente menciona que", "cliente menciona que",
+            "el cliente manifiesta que", "cliente manifiesta que",
+            "el cliente solicita que", "el cliente solicita", "cliente solicita",
+            "el cliente requiere que", "el cliente requiere", "cliente requiere",
+            "el cliente necesita que", "el cliente necesita", "cliente necesita",
+            "el usuario indica que", "usuario indica que",
+            "el usuario informa que", "usuario informa que",
+            "el usuario reporta que", "usuario reporta que",
+            "el usuario solicita que", "usuario solicita",
+            "el usuario requiere que", "usuario requiere",
+            "el usuario necesita que", "usuario necesita",
+            "llama para informar que", "llama para indicar que",
+            "llama para solicitar", "llama para consultar", "llama para reportar",
+            "llama porque", "llama por",
+            "se comunica para", "se contacta para",
+            "contacta para informar que", "contacta para solicitar",
+            "solicita que", "requiere que", "necesita que",
+            "informa que", "indica que", "menciona que", "comenta que",
+            "reporta que", "senala que", "manifiesta que",
+            "consulta si", "consulta por", "pregunta si", "pregunta por"
+        ],
         "urgencias": {
             "Muy baja": 1,
             "Baja": 2,
@@ -207,6 +242,56 @@ def esc(s):
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;"))
+
+
+# --------------------------------------------------------------------------- #
+# Resumen automatico del titulo (boton "Auto")
+# --------------------------------------------------------------------------- #
+_TITULO_SENT_RE = re.compile(r"(?<=[.!?;])\s+")
+
+
+def _normalizar(s):
+    """minusculas y sin tildes, solo para comparar (no altera el texto real)."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return s.lower().strip()
+
+
+def fragmentos_descripcion(desc):
+    """Parte la descripcion en oraciones/lineas candidatas, en orden."""
+    for linea in (desc or "").splitlines():
+        linea = linea.strip()
+        if not linea:
+            continue
+        for frag in _TITULO_SENT_RE.split(linea):
+            frag = frag.strip(" .!?;,")
+            if frag:
+                yield frag
+
+
+def limpiar_resumen(cfg, texto):
+    """Quita saludos, etiquetas ('Motivo:') y frases de relleno del inicio
+    ('el cliente indica que...') para quedarse con el motivo real de la llamada."""
+    etiquetas = [_normalizar(e) for e in (cfg.get("ui", {}).get("titulo_etiquetas_ignorar") or [])]
+    frases = [_normalizar(f) for f in (cfg.get("ui", {}).get("titulo_frases_ignorar") or [])]
+    out = (texto or "").strip()
+    cambiado = True
+    while out and cambiado:
+        cambiado = False
+        plano = _normalizar(out)
+        for etq in etiquetas:
+            if etq and plano.startswith(etq + ":"):
+                out = out[len(etq) + 1:].lstrip(" ,:;-").strip()
+                cambiado = True
+                break
+        if cambiado:
+            continue
+        for f in frases:
+            if f and plano.startswith(f):
+                out = out[len(f):].lstrip(" ,:;-").strip()
+                cambiado = True
+                break
+    return re.sub(r"\s+", " ", out).strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -419,6 +504,8 @@ class TicketWindow(tk.Toplevel):
         self.attachments = []
         self.title_manual = False
         self.dominio_manual = False
+        self.categoria_manual = False
+        self._ajustando = False
         self.sending = False
         self.closed = False
         self._tmpdir = None
@@ -512,6 +599,7 @@ class TicketWindow(tk.Toplevel):
             self.cb_categoria = ttk.Combobox(fila, values=[""] + list(cats.keys()),
                                              width=20, state="readonly")
             self.cb_categoria.pack(side="left", padx=4)
+            self.cb_categoria.bind("<<ComboboxSelected>>", self._on_categoria_manual)
         else:
             self.cb_categoria = None
 
@@ -676,7 +764,50 @@ class TicketWindow(tk.Toplevel):
         self.dominio_manual = True
         self._on_correo()
 
+    def _dominio_efectivo(self):
+        """Dominio que manda para elegir la entidad.
+
+        Si en el campo de usuario hay un correo completo, gana ese dominio; si
+        no, el del desplegable. Con el formulario recien abierto (sin usuario y
+        sin haber tocado el desplegable) devuelve "" para no mover la entidad
+        que viene de glpi.entities_id.
+        """
+        usuario = self.e_usuario.get().strip()
+        if "@" in usuario:
+            return "@" + usuario.rsplit("@", 1)[1].strip().lower()
+        if usuario or self.dominio_manual:
+            return (self.cb_dominio.get() or "").strip().lower()
+        return ""
+
+    def _entidad_por_dominio(self, dominio):
+        """Nombre de entidad mapeado a ese dominio en ui.entidad_por_dominio."""
+        if not dominio:
+            return ""
+        mapa = self.cfg["ui"].get("entidad_por_dominio", {}) or {}
+        for dom, nombre in mapa.items():
+            if dom.strip().lower() == dominio:
+                return nombre
+        return ""
+
+    def _auto_entidad_por_correo(self):
+        """Cambia la entidad segun el dominio del correo elegido."""
+        if self.cb_entidad is None or self._ajustando:
+            return
+        ents = self.cfg["ui"].get("entidades", {}) or {}
+        nombre = self._entidad_por_dominio(self._dominio_efectivo())
+        if nombre and nombre in ents and self.cb_entidad.get() != nombre:
+            self._ajustando = True          # evita rebotes entidad <-> dominio
+            try:
+                self.cb_entidad.set(nombre)
+                self._on_entidad()
+            finally:
+                self._ajustando = False
+
+    def _on_categoria_manual(self, event=None):
+        self.categoria_manual = True
+
     def _on_correo(self, event=None):
+        self._auto_entidad_por_correo()
         usuario = self.e_usuario.get().strip()
         if not usuario:
             self.lbl_correo.configure(text="solicitante por defecto", foreground="#888")
@@ -710,6 +841,16 @@ class TicketWindow(tk.Toplevel):
         bloque = por.get(str(self.entidad_id())) or {}
         return bloque.get(clave) or {}
 
+    def _categoria_por_defecto(self, valores):
+        """Categoria preferida (ui.categoria_preferida, ej. 'MDA') si esta
+        visible entre las categorias de la entidad elegida; si no, ninguna."""
+        preferida = (self.cfg["ui"].get("categoria_preferida") or "").strip().lower()
+        if preferida:
+            for v in valores:
+                if preferida in v.lower():
+                    return v
+        return ""
+
     def _on_entidad(self, event=None):
         """Reajusta categoria y sucursal a lo que existe en la entidad elegida."""
         # La categoria debe ser un id valido en la entidad: si no hay ninguna
@@ -722,7 +863,12 @@ class TicketWindow(tk.Toplevel):
             actual = self.cb_categoria.get()
             self.cb_categoria.configure(values=[""] + valores,
                                         state="readonly" if valores else "disabled")
-            self.cb_categoria.set(actual if actual in valores else "")
+            if actual in valores:
+                self.cb_categoria.set(actual)
+            elif not self.categoria_manual:
+                self.cb_categoria.set(self._categoria_por_defecto(valores))
+            else:
+                self.cb_categoria.set("")
 
         sucs = self._visibles("sucursales")
         self.sucursal_texto_libre = not bool(sucs)
@@ -732,11 +878,14 @@ class TicketWindow(tk.Toplevel):
         if actual:
             self.cb_sucursal.set(actual)
 
-        # El dominio del correo sigue a la entidad, salvo que se haya elegido a mano.
+        # El dominio del correo sigue a la entidad, salvo que se haya elegido a
+        # mano. Solo se reavisa si el dominio realmente cambio, para no rebotar
+        # con _auto_entidad_por_correo() (que hace el camino inverso).
         porent = self.cfg["ui"].get("dominio_por_entidad") or {}
         sugerido = porent.get(str(self.entidad_id()))
         if (sugerido and not getattr(self, "dominio_manual", False)
                 and getattr(self, "cb_dominio", None) is not None
+                and sugerido != self.cb_dominio.get()
                 and sugerido in (self.cb_dominio["values"] or ())):
             self.cb_dominio.set(sugerido)
             self._on_correo()
@@ -764,22 +913,31 @@ class TicketWindow(tk.Toplevel):
         self.dominio_manual = False
         self._refresh_title()
 
+    def _resumen_desc(self, desc):
+        """Elige la primera oracion con contenido real (sin saludos ni frases
+        de relleno como 'el cliente indica que...') y la recorta a resumen_max."""
+        limit = int(self.cfg["ui"].get("resumen_max", 70))
+        elegido, primera = "", ""
+        for frag in fragmentos_descripcion(desc):
+            if not primera:
+                primera = frag
+            limpio = limpiar_resumen(self.cfg, frag)
+            if len(limpio) >= 3:
+                elegido = limpio
+                break
+        resumen = elegido or primera
+        if not resumen:
+            return ""
+        resumen = resumen[:1].upper() + resumen[1:]
+        if len(resumen) <= limit:
+            return resumen
+        cut = resumen[:limit]
+        return (cut.rsplit(" ", 1)[0] if " " in cut else cut) + "..."
+
     def _build_title(self):
         suc = self.cb_sucursal.get().strip() or "Sin sucursal"
         desc = self.t_desc.get("1.0", "end").strip()
-        limit = int(self.cfg["ui"].get("resumen_max", 70))
-        resumen = ""
-        if desc:
-            first = ""
-            for line in desc.splitlines():
-                if line.strip():
-                    first = line.strip()
-                    break
-            if len(first) <= limit:
-                resumen = first
-            else:
-                cut = first[:limit]
-                resumen = (cut.rsplit(" ", 1)[0] if " " in cut else cut) + "..."
+        resumen = self._resumen_desc(desc) if desc else ""
         tpl = self.cfg["ui"].get("title_template", "{sucursal} - {resumen}")
         try:
             out = tpl.format(sucursal=suc, resumen=resumen,
